@@ -3,6 +3,7 @@
 (define-constant err-not-found (err u100))
 (define-constant err-unauthorized (err u101))
 (define-constant err-already-exists (err u102))
+(define-constant err-invalid-input (err u103))
 
 ;; Data structures
 (define-map documents
@@ -25,31 +26,38 @@
   }
 )
 
+(define-data-var history-index uint u0)
+
+;; Events
+(define-public (print-event (event-type (string-ascii 12)) (hash (buff 32)))
+  (ok (print { event-type: event-type, hash: hash, caller: tx-sender }))
+)
+
 ;; Storage functions
 (define-public (store-document (hash (buff 32)) (name (string-ascii 64)) (mime-type (string-ascii 64)))
-  (let ((doc-exists (get-document-info hash)))
-    (if (is-ok doc-exists)
-      err-already-exists
-      (begin
-        (try! (map-set documents
-          { hash: hash }
-          {
-            owner: tx-sender,
-            name: name,
-            mime-type: mime-type,
-            timestamp: block-height,
-            status: "active"
-          }
-        ))
-        (try! (map-set document-history
-          { hash: hash, index: u0 }
-          {
-            owner: tx-sender,
-            timestamp: block-height,
-            action: "created"
-          }
-        ))
-        (ok true)
+  (begin
+    (asserts! (> (len hash) u0) err-invalid-input)
+    (asserts! (> (len name) u0) err-invalid-input)
+    (asserts! (> (len mime-type) u0) err-invalid-input)
+    
+    (let ((doc-exists (get-document-info hash)))
+      (if (is-ok doc-exists)
+        err-already-exists
+        (begin
+          (try! (map-set documents
+            { hash: hash }
+            {
+              owner: tx-sender,
+              name: name,
+              mime-type: mime-type,
+              timestamp: block-height,
+              status: "active"
+            }
+          ))
+          (try! (add-history-entry hash tx-sender "created"))
+          (try! (print-event "store" hash))
+          (ok true)
+        )
       )
     )
   )
@@ -71,23 +79,31 @@
 ;; Ownership management
 (define-public (transfer-ownership (hash (buff 32)) (new-owner principal))
   (let ((doc (unwrap! (get-document-info hash) err-not-found)))
-    (if (is-eq (get owner doc) tx-sender)
-      (begin
-        (try! (map-set documents
-          { hash: hash }
-          (merge doc { owner: new-owner })
-        ))
-        (try! (map-set document-history
-          { hash: hash, index: u1 }
-          {
-            owner: new-owner,
-            timestamp: block-height,
-            action: "transferred"
-          }
-        ))
-        (ok true)
-      )
-      err-unauthorized
+    (asserts! (is-eq (get owner doc) tx-sender) err-unauthorized)
+    (begin
+      (try! (map-set documents
+        { hash: hash }
+        (merge doc { owner: new-owner })
+      ))
+      (try! (add-history-entry hash new-owner "transferred"))
+      (try! (print-event "transfer" hash))
+      (ok true)
+    )
+  )
+)
+
+;; Document status management
+(define-public (set-document-status (hash (buff 32)) (new-status (string-ascii 16)))
+  (let ((doc (unwrap! (get-document-info hash) err-not-found)))
+    (asserts! (is-eq (get owner doc) tx-sender) err-unauthorized)
+    (begin
+      (try! (map-set documents
+        { hash: hash }
+        (merge doc { status: new-status })
+      ))
+      (try! (add-history-entry hash tx-sender new-status))
+      (try! (print-event "status" hash))
+      (ok true)
     )
   )
 )
@@ -95,4 +111,21 @@
 ;; Helper functions
 (define-private (get-document-info (hash (buff 32)))
   (ok (unwrap! (map-get? documents {hash: hash}) err-not-found))
+)
+
+(define-private (add-history-entry (hash (buff 32)) (owner principal) (action (string-ascii 16)))
+  (let ((current-index (var-get history-index)))
+    (begin
+      (try! (map-set document-history
+        { hash: hash, index: current-index }
+        {
+          owner: owner,
+          timestamp: block-height,
+          action: action
+        }
+      ))
+      (var-set history-index (+ current-index u1))
+      (ok true)
+    )
+  )
 )
